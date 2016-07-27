@@ -299,12 +299,14 @@ def main(argv=None):  # pylint: disable=unused-argument
         lambda: (images_train, labels_train),
         lambda: (images_val, labels_val))
 
-    logits = inference_small(images,
+    logits, logits2list, varlist, varlist2 = inference_small(images,
                              num_classes=10,
                              is_training=is_training,
                              use_bias=(not FLAGS.use_bn),
                              num_blocks=3)
-    train(is_training, logits, images, labels)
+    print(logits)
+    print(logits.get_shape())
+    train(is_training, logits, logits2list, images, labels, varlist, varlist2)
 
 
 if __name__ == '__main__':

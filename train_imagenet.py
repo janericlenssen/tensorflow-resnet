@@ -1,6 +1,7 @@
 import skimage.io  # bug. need to import this before tensorflow
 import skimage.transform  # bug. need to import this before tensorflow
 from resnet_train import train
+from resnet import inference
 import tensorflow as tf
 import time
 import os

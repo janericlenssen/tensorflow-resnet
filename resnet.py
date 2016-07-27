@@ -45,12 +45,18 @@ def inference(x, is_training,
     c['num_blocks'] = num_blocks
     c['stack_stride'] = 2
 
+    yr = []
+    lr = []
+    lr2 = []
+
     with tf.variable_scope('scale1'):
         c['conv_filters_out'] = 64
         c['ksize'] = 7
         c['stride'] = 2
-        x = conv(x, c)
-        x = bn(x, c)
+        x, l = conv(x, c)
+        lr +=l
+        x, l = bn(x, c)
+        lr +=l
         x = activation(x)
 
     with tf.variable_scope('scale2'):
@@ -58,32 +64,44 @@ def inference(x, is_training,
         c['num_blocks'] = num_blocks[0]
         c['stack_stride'] = 1
         c['block_filters_internal'] = 64
-        x = stack(x, c)
+        x, y, l, l2 = stack(x, c)
+        lr +=l
+        lr2 +=l2
+        yr +=y
 
     with tf.variable_scope('scale3'):
         c['num_blocks'] = num_blocks[1]
         c['block_filters_internal'] = 128
         assert c['stack_stride'] == 2
-        x = stack(x, c)
+        x, y, l, l2 = stack(x, c)
+        lr +=l
+        lr2 +=l2
+        yr +=y
 
     with tf.variable_scope('scale4'):
         c['num_blocks'] = num_blocks[2]
         c['block_filters_internal'] = 256
-        x = stack(x, c)
+        x, y, l, l2 = stack(x, c)
+        lr +=l
+        lr2 +=l2
+        yr +=y
 
     with tf.variable_scope('scale5'):
         c['num_blocks'] = num_blocks[3]
         c['block_filters_internal'] = 512
-        x = stack(x, c)
+        x, y, l, l2 = stack(x, c)
+        lr +=l
+        lr2 +=l2
+        yr +=y
 
     # post-net
     x = tf.reduce_mean(x, reduction_indices=[1, 2], name="avg_pool")
 
     if num_classes != None:
         with tf.variable_scope('fc'):
-            x = fc(x, c)
-
-    return x
+            x, l = fc(x, c)
+            lr += l
+    return x, yr, lr, lr2
 
 
 # This is what they use for CIFAR-10 and 100.
@@ -101,39 +119,57 @@ def inference_small(x,
     c['fc_units_out'] = num_classes
     c['num_blocks'] = num_blocks
     c['num_classes'] = num_classes
-    inference_small_config(x, c)
+    x, yr, lr, lr2 = inference_small_config(x, c)
+    return x, yr, lr, lr2
+
 
 def inference_small_config(x, c):
     c['bottleneck'] = False
     c['ksize'] = 3
     c['stride'] = 1
+    yr = []
+    lr = []
+    lr2 = []
     with tf.variable_scope('scale1'):
         c['conv_filters_out'] = 16
         c['block_filters_internal'] = 16
         c['stack_stride'] = 1
-        x = conv(x, c)
-        x = bn(x, c)
+        x, l = conv(x, c)
+        lr += l
+        x, l = bn(x, c)
+        lr += l
         x = activation(x)
-        x = stack(x, c)
+        x, y, l, l2 = stack(x, c)
+        yr += y
+        lr += l
+        lr2 += l2
 
     with tf.variable_scope('scale2'):
         c['block_filters_internal'] = 32
         c['stack_stride'] = 2
-        x = stack(x, c)
+        x, y, l, l2 = stack(x, c)
+        yr += y
+        lr += l
+        lr2 += l2
 
     with tf.variable_scope('scale3'):
         c['block_filters_internal'] = 64
         c['stack_stride'] = 2
-        x = stack(x, c)
+        x, y, l, l2 = stack(x, c)
+        yr += y
+        lr += l
+        lr2 += l2
 
     # post-net
+    shape = x.get_shape().as_list()
+    print(shape[1],shape[2],shape[3])
     x = tf.reduce_mean(x, reduction_indices=[1, 2], name="avg_pool")
 
     if c['num_classes'] != None:
         with tf.variable_scope('fc'):
-            x = fc(x, c)
-
-    return x
+            x, l = fc(x, c)
+            lr += l
+    return x, yr, lr, lr2
 
 
 def _imagenet_preprocess(rgb):
@@ -144,7 +180,7 @@ def _imagenet_preprocess(rgb):
     return bgr
 
 
-def loss(logits, labels):
+def loss(logits, logits2list, labels):
     cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(logits, labels)
     cross_entropy_mean = tf.reduce_mean(cross_entropy)
  
@@ -153,19 +189,39 @@ def loss(logits, labels):
     loss_ = tf.add_n([cross_entropy_mean] + regularization_losses)
     tf.scalar_summary('loss', loss_)
 
-    return loss_
+    cross_entropy2 = tf.nn.sparse_softmax_cross_entropy_with_logits(logits2list[0], labels)
+    cross_entropy_mean2 = tf.reduce_mean(cross_entropy2)
+    cross_entropy_mean2 = tf.expand_dims(cross_entropy_mean2,0)
+    for l in logits2list[1:]:
+        cross_entropy2 = tf.nn.sparse_softmax_cross_entropy_with_logits(l, labels)
+        cross_entropy_mean2 = tf.concat(0,[cross_entropy_mean2, tf.expand_dims(tf.reduce_mean(cross_entropy2),0)])
+
+    cross_entropy_mean2 = tf.reduce_sum(cross_entropy_mean2)
+    loss2 = tf.add_n([cross_entropy_mean2])
+    tf.scalar_summary('loss2', loss2)
+
+    return loss_, loss2
 
 
 def stack(x, c):
+    yr = []
+    lr = []
+    lr2 = []
     for n in range(c['num_blocks']):
         s = c['stack_stride'] if n == 0 else 1
         c['block_stride'] = s
         with tf.variable_scope('block%d' % (n + 1)):
-            x = block(x, c)
-    return x
+            x, y, l, l2 = block(x, c)
+            yr += y
+            lr += l
+            lr2 += l2
+
+    return x, yr, lr, lr2
 
 
 def block(x, c):
+    lr = []
+    lr2 = []
     filters_in = x.get_shape()[-1]
 
     # Note: filters_out isn't how many filters are outputed. 
@@ -183,55 +239,79 @@ def block(x, c):
         with tf.variable_scope('a'):
             c['ksize'] = 1
             c['stride'] = c['block_stride']
-            x = conv(x, c)
-            x = bn(x, c)
+            x, l = conv(x, c)
+            lr += l
+            x, l = bn(x, c)
+            lr += l
             x = activation(x)
+            lr += l
 
         with tf.variable_scope('b'):
-            x = conv(x, c)
-            x = bn(x, c)
+            x, l = conv(x, c)
+            lr += l
+            x, l = bn(x, c)
+            lr += l
             x = activation(x)
 
         with tf.variable_scope('c'):
             c['conv_filters_out'] = filters_out
             c['ksize'] = 1
             assert c['stride'] == 1
-            x = conv(x, c)
+            x, l = conv(x, c)
+            lr += l
             x = bn(x, c)
     else:
         with tf.variable_scope('A'):
             c['stride'] = c['block_stride']
             assert c['ksize'] == 3
-            x = conv(x, c)
-            x = bn(x, c)
+            x, l = conv(x, c)
+            lr += l
+            x, l = bn(x, c)
+            lr += l
             x = activation(x)
 
         with tf.variable_scope('B'):
             c['conv_filters_out'] = filters_out
             assert c['ksize'] == 3
             assert c['stride'] == 1
-            x = conv(x, c)
-            x = bn(x, c)
+            x, l = conv(x, c)
+            lr += l
+            x, l = bn(x, c)
+            lr += l
 
     with tf.variable_scope('shortcut'):
         if filters_out != filters_in or c['block_stride'] != 1:
             c['ksize'] = 1
             c['stride'] = c['block_stride']
             c['conv_filters_out'] = filters_out
-            shortcut = conv(shortcut, c)
-            shortcut = bn(shortcut, c)
+            shortcut, l = conv(shortcut, c)
+            lr += l
+            shortcut, l = bn(shortcut, c)
+            lr += l
 
-    return activation(x + shortcut)
+    x = activation(x + shortcut)
+    xred = tf.nn.avg_pool(x,[1,8,8,1],[1,8,8,1],'SAME',name='avg_pool_red')
+    shape = xred.get_shape().as_list()
+    xred = tf.stop_gradient(tf.reshape(xred,[shape[0],shape[1]*shape[2]*shape[3] ]))
+    with tf.variable_scope('fc_early'):
+        yr = []
+        y, l = fc(xred, c, True)
+        yr.append(y)
+        lr2 += l
+
+    return x, yr, lr, lr2
 
 
 def bn(x, c):
+    lr = []
     x_shape = x.get_shape()
     params_shape = x_shape[-1:]
 
     if c['use_bias']:
         bias = _get_variable('bias', params_shape,
                              initializer=tf.zeros_initializer)
-        return x + bias
+        lr.append(bias)
+        return x + bias, lr
 
 
     axis = list(range(len(x_shape) - 1))
@@ -251,7 +331,10 @@ def bn(x, c):
                                     params_shape,
                                     initializer=tf.ones_initializer,
                                     trainable=False)
-
+    lr.append(beta)
+    lr.append(gamma)
+    lr.append(moving_mean)
+    lr.append(moving_variance)
     # These ops will only be preformed when training.
     mean, variance = tf.nn.moments(x, axis)
     update_moving_mean = moving_averages.assign_moving_average(moving_mean,
@@ -268,24 +351,34 @@ def bn(x, c):
     x = tf.nn.batch_normalization(x, mean, variance, beta, gamma, BN_EPSILON)
     #x.set_shape(inputs.get_shape()) ??
 
-    return x
+    return x, lr
 
 
-def fc(x, c):
+def fc(x, c, early = False):
+    lr = []
     num_units_in = x.get_shape()[1]
     num_units_out = c['fc_units_out']
     weights_initializer = tf.truncated_normal_initializer(
         stddev=FC_WEIGHT_STDDEV)
-
-    weights = _get_variable('weights',
+    if early:
+        weights = _get_variable('weights',
+                            shape=[num_units_in, num_units_out],
+                            initializer=weights_initializer,
+                            weight_decay=0.0)
+    else:
+        weights = _get_variable('weights',
                             shape=[num_units_in, num_units_out],
                             initializer=weights_initializer,
                             weight_decay=FC_WEIGHT_STDDEV)
+
     biases = _get_variable('biases',
                            shape=[num_units_out],
                            initializer=tf.zeros_initializer)
     x = tf.nn.xw_plus_b(x, weights, biases)
-    return x
+
+    lr.append(weights)
+    lr.append(biases)
+    return x, lr
 
 
 def _get_variable(name,
@@ -311,6 +404,7 @@ def _get_variable(name,
 
 
 def conv(x, c):
+    lr = []
     ksize = c['ksize']
     stride = c['stride']
     filters_out = c['conv_filters_out']
@@ -323,7 +417,8 @@ def conv(x, c):
                             dtype='float',
                             initializer=initializer,
                             weight_decay=CONV_WEIGHT_DECAY)
-    return tf.nn.conv2d(x, weights, [1, stride, stride, 1], padding='SAME')
+    lr.append(weights)
+    return tf.nn.conv2d(x, weights, [1, stride, stride, 1], padding='SAME'), lr
 
 
 def _max_pool(x, ksize=3, stride=2):
